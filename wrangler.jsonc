@@ -1,14 +1,12 @@
-{
-  "name": "lifeclone",
-  "main": "src/index.js",
-  "compatibility_date": "2025-01-01",
+name = "lifeclone"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
 
-  "durable_objects": {
-    "bindings": [
-      { "name": "LIFE_DO", "class_name": "LifeDO" }
-    ]
-  },
+[durable_objects]
+bindings = [
+  { name = "LIFE_DO", class_name = "LifeDO" }
+]
 
-  [[migrations]]
+[[migrations]]
 tag = "v1"
 new_sqlite_classes = ["LifeDO"]
