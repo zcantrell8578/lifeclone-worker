@@ -9,7 +9,6 @@
     ]
   },
 
-  "migrations": [
-    { "tag": "v1", "new_classes": ["LifeDO"] }
-  ]
-}
+  [[migrations]]
+tag = "v1"
+new_sqlite_classes = ["LifeDO"]
