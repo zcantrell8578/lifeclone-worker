@@ -14,7 +14,9 @@ function bad(msg, status = 400, details) {
   return json({ ok: false, error: msg, details }, status);
 }
 
-function parsePath(pathname) {
+function parsePersonRoute(pathname) {
+  // /v1/persons/:personId/state
+  // /v1/persons/:personId/events:batch
   const m = pathname.match(/^\/v1\/persons\/([^/]+)\/(state|events:batch)$/);
   if (!m) return null;
   return { personId: decodeURIComponent(m[1]), action: m[2] };
@@ -23,141 +25,17 @@ function parsePath(pathname) {
 async function readJson(req) {
   try { return await req.json(); } catch { return null; }
 }
-// Admin: create/register a persona key
-if (req.method === "POST") {
-  const m = url.pathname.match(/^\/v1\/persons\/([^/]+)\/keys$/);
-  if (m) {
-    const personId = decodeURIComponent(m[1]);
-
-    const master = getBearer(req);
-    if (!master || master !== env.MASTER_KEY) return bad("Forbidden", 403);
-
-    const body = await readJson(req);
-    const token = body?.token;
-    if (!token || typeof token !== "string" || token.length < 12) {
-      return bad("Expected JSON: { token: \"long-random-string\" }");
-    }
-
-    const now = Date.now();
-
-    await env.DB.prepare(
-      "INSERT INTO persons (person_id, created_at, updated_at, metadata_json) VALUES (?, ?, ?, ?) " +
-      "ON CONFLICT(person_id) DO UPDATE SET updated_at=excluded.updated_at"
-    ).bind(personId, now, now, "{}").run();
-
-    const hash = await sha256Hex(`${personId}:${token}:${env.AUTH_PEPPER}`);
-    await env.DB.prepare(
-      "INSERT OR IGNORE INTO persona_keys (person_id, api_key_hash, created_at) VALUES (?, ?, ?)"
-    ).bind(personId, hash, now).run();
-
-    return json({ ok: true, person_id: personId });
-  }
-}
-// Durable Object "brain" (one per person_id)
-export class LifeDO {
-  constructor(state, env) {
-    this.state = state;
-    this.env = env;
-  }
-
-  async fetch(req) {
-    const url = new URL(req.url);
-    if (req.method === "OPTIONS") return new Response(null, { status: 204 });
-
-    if (req.method === "GET" && url.pathname === "/state") {
-      const cursor = (await this.state.storage.get("cursor")) ?? 0;
-      const lifeState = (await this.state.storage.get("life_state")) ?? defaultLifeState();
-      return json({ ok: true, cursor, state: lifeState, server_time: Date.now() });
-    }
-
-    if (req.method === "POST" && url.pathname === "/events:batch") {
-      const body = await readJson(req);
-      if (!body || !Array.isArray(body.events)) return bad("Expected JSON: { events: [...] }");
-
-      let cursor = (await this.state.storage.get("cursor")) ?? 0;
-      let lifeState = (await this.state.storage.get("life_state")) ?? defaultLifeState();
-      let seen = (await this.state.storage.get("seen_event_ids")) ?? {};
-      const now = Date.now();
-
-      const accepted = [];
-      const rejected = [];
-const personId = req.headers.get("x-person-id") || "unknown";
-
-if (this.env.DB && accepted.length > 0) {
-  const stmts = [];
-  for (const a of accepted) {
-    if (a.deduped) continue;
-    const e = body.events.find(x => x.event_id === a.event_id);
-    if (!e) continue;
-
-    stmts.push(
-      this.env.DB.prepare(
-        "INSERT OR IGNORE INTO person_events (person_id, cursor, event_id, ts, server_ts, kind, schema_v, payload_json) " +
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-      ).bind(
-        personId,
-        a.cursor,
-        e.event_id,
-        e.ts,
-        now,
-        e.kind,
-        e.schema_v,
-        JSON.stringify(e.payload)
-      )
-    );
-  }
-  if (stmts.length) await this.env.DB.batch(stmts);
-        }
-      if (body.events.length > 100) return bad("Too many events (max 100).");
-
-      for (const e of body.events) {
-        const err = validateEvent(e);
-        if (err) { rejected.push({ event_id: e?.event_id, reason: err }); continue; }
-
-        if (seen[e.event_id]) {
-          accepted.push({ event_id: e.event_id, cursor: seen[e.event_id], deduped: true });
-          continue;
-        }
-
-        cursor += 1;
-        lifeState = applyEvent(lifeState, e, now);
-
-        seen[e.event_id] = cursor;
-        accepted.push({ event_id: e.event_id, cursor });
-      }
-
-      seen = trimSeen(seen, 500);
-
-      await this.state.storage.put("cursor", cursor);
-      await this.state.storage.put("life_state", lifeState);
-      await this.state.storage.put("seen_event_ids", seen);
-
-      return json({ ok: true, cursor, accepted, rejected });
-    }
-
-    return bad("Not found", 404);
-  }
-}
-
-export default {
-  async fetch(req, env) {
-    const url = new URL(req.url);
-    if (req.method === "OPTIONS") return new Response(null, { status: 204 });
-
-    if (url.pathname === "/v1/health") {
-      return json({ ok: true, server_time: Date.now() });
-    }
-
-async function sha256Hex(str) {
-  const data = new TextEncoder().encode(str);
-  const digest = await crypto.subtle.digest("SHA-256", data);
-  return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, "0")).join("");
-}
 
 function getBearer(req) {
   const h = req.headers.get("authorization") || "";
   const m = h.match(/^Bearer\s+(.+)$/i);
   return m ? m[1].trim() : null;
+}
+
+async function sha256Hex(str) {
+  const data = new TextEncoder().encode(str);
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
 async function requirePersonaAuth(req, env, personId) {
@@ -175,28 +53,6 @@ async function requirePersonaAuth(req, env, personId) {
   if (!row) return { ok: false, status: 403, error: "Invalid token for this person_id" };
   return { ok: true };
 }
-    
-    const parsed = parsePath(url.pathname);
-    if (!parsed) return bad("Not found", 404);
-
-    if (!env.LIFE_DO) return bad("Missing Durable Object binding LIFE_DO", 500);
-
-    const id = env.LIFE_DO.idFromName(parsed.personId);
-    const stub = env.LIFE_DO.get(id);
-
-    const inner = new URL(req.url);
-    inner.pathname = parsed.action === "state" ? "/state" : "/events:batch";
-
-    return stub.fetch(new Request(inner.toString(), req));
-  }
-};const headers = new Headers(req.headers);
-headers.set("x-person-id", parsed.personId);
-
-return stub.fetch(new Request(innerUrl.toString(), {
-  method: req.method,
-  headers,
-  body: req.method === "GET" ? null : req.body
-}));
 
 function defaultLifeState() {
   return {
@@ -209,10 +65,7 @@ function defaultLifeState() {
     decision_style: { prefers_time_over_money: 0, prefers_low_stress: 0, prefers_routine: 0 }
   };
 }
-if (parsed.action === "events:batch") {
-  const auth = await requirePersonaAuth(req, env, parsed.personId);
-  if (!auth.ok) return bad(auth.error, auth.status);
-}
+
 function validateEvent(e) {
   if (!e || typeof e !== "object") return "Event must be an object";
   if (typeof e.event_id !== "string" || e.event_id.length < 8) return "Invalid event_id";
@@ -293,3 +146,160 @@ function trimSeen(seenMap, keepN) {
   for (let i = 0; i < drop; i++) delete seenMap[entries[i][0]];
   return seenMap;
 }
+
+// Durable Object "brain" (one per person_id)
+export class LifeDO {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+  }
+
+  async fetch(req) {
+    const url = new URL(req.url);
+    if (req.method === "OPTIONS") return new Response(null, { status: 204 });
+
+    const personId = req.headers.get("x-person-id") || "unknown";
+
+    if (req.method === "GET" && url.pathname === "/state") {
+      const cursor = (await this.state.storage.get("cursor")) ?? 0;
+      const lifeState = (await this.state.storage.get("life_state")) ?? defaultLifeState();
+      return json({ ok: true, cursor, state: lifeState, server_time: Date.now() });
+    }
+
+    if (req.method === "POST" && url.pathname === "/events:batch") {
+      const body = await readJson(req);
+      if (!body || !Array.isArray(body.events)) return bad("Expected JSON: { events: [...] }");
+
+      let cursor = (await this.state.storage.get("cursor")) ?? 0;
+      let lifeState = (await this.state.storage.get("life_state")) ?? defaultLifeState();
+      let seen = (await this.state.storage.get("seen_event_ids")) ?? {};
+      const now = Date.now();
+
+      const accepted = [];
+      const rejected = [];
+
+      if (body.events.length > 100) return bad("Too many events (max 100).");
+
+      for (const e of body.events) {
+        const err = validateEvent(e);
+        if (err) { rejected.push({ event_id: e?.event_id, reason: err }); continue; }
+
+        if (seen[e.event_id]) {
+          accepted.push({ event_id: e.event_id, cursor: seen[e.event_id], deduped: true });
+          continue;
+        }
+
+        cursor += 1;
+        lifeState = applyEvent(lifeState, e, now);
+
+        seen[e.event_id] = cursor;
+        accepted.push({ event_id: e.event_id, cursor });
+      }
+
+      seen = trimSeen(seen, 500);
+
+      await this.state.storage.put("cursor", cursor);
+      await this.state.storage.put("life_state", lifeState);
+      await this.state.storage.put("seen_event_ids", seen);
+
+      // Persist accepted events to D1 (best-effort)
+      if (this.env.DB && accepted.length > 0) {
+        const stmts = [];
+        for (const a of accepted) {
+          if (a.deduped) continue;
+          const e = body.events.find(x => x.event_id === a.event_id);
+          if (!e) continue;
+
+          stmts.push(
+            this.env.DB.prepare(
+              "INSERT OR IGNORE INTO person_events (person_id, cursor, event_id, ts, server_ts, kind, schema_v, payload_json) " +
+              "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            ).bind(
+              personId,
+              a.cursor,
+              e.event_id,
+              e.ts,
+              now,
+              e.kind,
+              e.schema_v,
+              JSON.stringify(e.payload)
+            )
+          );
+        }
+        if (stmts.length) await this.env.DB.batch(stmts);
+      }
+
+      return json({ ok: true, cursor, accepted, rejected });
+    }
+
+    return bad("Not found", 404);
+  }
+}
+
+export default {
+  async fetch(req, env) {
+    const url = new URL(req.url);
+    if (req.method === "OPTIONS") return new Response(null, { status: 204 });
+
+    // Health
+    if (url.pathname === "/v1/health") return json({ ok: true, server_time: Date.now() });
+
+    // Admin: create/register a persona key
+    if (req.method === "POST") {
+      const m = url.pathname.match(/^\/v1\/persons\/([^/]+)\/keys$/);
+      if (m) {
+        const personId = decodeURIComponent(m[1]);
+        const master = getBearer(req);
+        if (!master || master !== env.MASTER_KEY) return bad("Forbidden", 403);
+
+        const body = await readJson(req);
+        const token = body?.token;
+        if (!token || typeof token !== "string" || token.length < 12) {
+          return bad("Expected JSON: { token: \"long-random-string\" }");
+        }
+        if (!env.DB) return bad("Missing D1 binding DB", 500);
+        if (!env.AUTH_PEPPER) return bad("Missing secret AUTH_PEPPER", 500);
+
+        const now = Date.now();
+
+        await env.DB.prepare(
+          "INSERT INTO persons (person_id, created_at, updated_at, metadata_json) VALUES (?, ?, ?, ?) " +
+          "ON CONFLICT(person_id) DO UPDATE SET updated_at=excluded.updated_at"
+        ).bind(personId, now, now, "{}").run();
+
+        const hash = await sha256Hex(`${personId}:${token}:${env.AUTH_PEPPER}`);
+        await env.DB.prepare(
+          "INSERT OR IGNORE INTO persona_keys (person_id, api_key_hash, created_at) VALUES (?, ?, ?)"
+        ).bind(personId, hash, now).run();
+
+        return json({ ok: true, person_id: personId });
+      }
+    }
+
+    // Person routes -> DO
+    const parsed = parsePersonRoute(url.pathname);
+    if (!parsed) return bad("Not found", 404);
+    if (!env.LIFE_DO) return bad("Missing Durable Object binding LIFE_DO", 500);
+
+    // Require auth for writes
+    if (parsed.action === "events:batch") {
+      const auth = await requirePersonaAuth(req, env, parsed.personId);
+      if (!auth.ok) return bad(auth.error, auth.status);
+    }
+
+    const id = env.LIFE_DO.idFromName(parsed.personId);
+    const stub = env.LIFE_DO.get(id);
+
+    const innerUrl = new URL(req.url);
+    innerUrl.pathname = parsed.action === "state" ? "/state" : "/events:batch";
+
+    const headers = new Headers(req.headers);
+    headers.set("x-person-id", parsed.personId);
+
+    return stub.fetch(new Request(innerUrl.toString(), {
+      method: req.method,
+      headers,
+      body: req.method === "GET" ? null : req.body
+    }));
+  }
+};
