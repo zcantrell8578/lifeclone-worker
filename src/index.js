@@ -23,7 +23,36 @@ function parsePath(pathname) {
 async function readJson(req) {
   try { return await req.json(); } catch { return null; }
 }
+// Admin: create/register a persona key
+if (req.method === "POST") {
+  const m = url.pathname.match(/^\/v1\/persons\/([^/]+)\/keys$/);
+  if (m) {
+    const personId = decodeURIComponent(m[1]);
 
+    const master = getBearer(req);
+    if (!master || master !== env.MASTER_KEY) return bad("Forbidden", 403);
+
+    const body = await readJson(req);
+    const token = body?.token;
+    if (!token || typeof token !== "string" || token.length < 12) {
+      return bad("Expected JSON: { token: \"long-random-string\" }");
+    }
+
+    const now = Date.now();
+
+    await env.DB.prepare(
+      "INSERT INTO persons (person_id, created_at, updated_at, metadata_json) VALUES (?, ?, ?, ?) " +
+      "ON CONFLICT(person_id) DO UPDATE SET updated_at=excluded.updated_at"
+    ).bind(personId, now, now, "{}").run();
+
+    const hash = await sha256Hex(`${personId}:${token}:${env.AUTH_PEPPER}`);
+    await env.DB.prepare(
+      "INSERT OR IGNORE INTO persona_keys (person_id, api_key_hash, created_at) VALUES (?, ?, ?)"
+    ).bind(personId, hash, now).run();
+
+    return json({ ok: true, person_id: personId });
+  }
+}
 // Durable Object "brain" (one per person_id)
 export class LifeDO {
   constructor(state, env) {
@@ -52,7 +81,33 @@ export class LifeDO {
 
       const accepted = [];
       const rejected = [];
+const personId = req.headers.get("x-person-id") || "unknown";
 
+if (this.env.DB && accepted.length > 0) {
+  const stmts = [];
+  for (const a of accepted) {
+    if (a.deduped) continue;
+    const e = body.events.find(x => x.event_id === a.event_id);
+    if (!e) continue;
+
+    stmts.push(
+      this.env.DB.prepare(
+        "INSERT OR IGNORE INTO person_events (person_id, cursor, event_id, ts, server_ts, kind, schema_v, payload_json) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+      ).bind(
+        personId,
+        a.cursor,
+        e.event_id,
+        e.ts,
+        now,
+        e.kind,
+        e.schema_v,
+        JSON.stringify(e.payload)
+      )
+    );
+  }
+  if (stmts.length) await this.env.DB.batch(stmts);
+        }
       if (body.events.length > 100) return bad("Too many events (max 100).");
 
       for (const e of body.events) {
@@ -93,6 +148,34 @@ export default {
       return json({ ok: true, server_time: Date.now() });
     }
 
+async function sha256Hex(str) {
+  const data = new TextEncoder().encode(str);
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+function getBearer(req) {
+  const h = req.headers.get("authorization") || "";
+  const m = h.match(/^Bearer\s+(.+)$/i);
+  return m ? m[1].trim() : null;
+}
+
+async function requirePersonaAuth(req, env, personId) {
+  const token = getBearer(req);
+  if (!token) return { ok: false, status: 401, error: "Missing Authorization: Bearer <token>" };
+  if (!env.DB) return { ok: false, status: 500, error: "Missing D1 binding DB" };
+  if (!env.AUTH_PEPPER) return { ok: false, status: 500, error: "Missing secret AUTH_PEPPER" };
+
+  const hash = await sha256Hex(`${personId}:${token}:${env.AUTH_PEPPER}`);
+  const row = await env.DB
+    .prepare("SELECT 1 FROM persona_keys WHERE person_id = ? AND api_key_hash = ? LIMIT 1")
+    .bind(personId, hash)
+    .first();
+
+  if (!row) return { ok: false, status: 403, error: "Invalid token for this person_id" };
+  return { ok: true };
+}
+    
     const parsed = parsePath(url.pathname);
     if (!parsed) return bad("Not found", 404);
 
@@ -106,7 +189,14 @@ export default {
 
     return stub.fetch(new Request(inner.toString(), req));
   }
-};
+};const headers = new Headers(req.headers);
+headers.set("x-person-id", parsed.personId);
+
+return stub.fetch(new Request(innerUrl.toString(), {
+  method: req.method,
+  headers,
+  body: req.method === "GET" ? null : req.body
+}));
 
 function defaultLifeState() {
   return {
@@ -119,7 +209,10 @@ function defaultLifeState() {
     decision_style: { prefers_time_over_money: 0, prefers_low_stress: 0, prefers_routine: 0 }
   };
 }
-
+if (parsed.action === "events:batch") {
+  const auth = await requirePersonaAuth(req, env, parsed.personId);
+  if (!auth.ok) return bad(auth.error, auth.status);
+}
 function validateEvent(e) {
   if (!e || typeof e !== "object") return "Event must be an object";
   if (typeof e.event_id !== "string" || e.event_id.length < 8) return "Invalid event_id";
