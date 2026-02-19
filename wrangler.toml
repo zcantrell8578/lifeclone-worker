@@ -10,3 +10,8 @@ bindings = [
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["LifeDO"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "lifeclone_db"
+database_id = "14ccfe2c-c0f4-4c09-8b40-ed92c6355e2a"
